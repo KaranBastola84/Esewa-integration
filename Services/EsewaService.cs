@@ -76,39 +76,47 @@ public class EsewaService : IEsewaService
         {
             var httpClient = _httpClientFactory.CreateClient();
 
-            // Prepare verification URL with query parameters
-            var verificationUrl = $"{_esewaConfig.VerificationUrl}?amt={request.Amount:0.00}&rid={request.RefId}&pid={request.ProductId}&scd={_esewaConfig.MerchantCode}";
+            // New eSewa API verification endpoint with query parameters
+            var verificationUrl = $"{_esewaConfig.VerificationUrl}?product_code={_esewaConfig.MerchantCode}&total_amount={request.Amount:0.00}&transaction_uuid={request.TransactionId}";
 
             var response = await httpClient.GetAsync(verificationUrl);
             var content = await response.Content.ReadAsStringAsync();
 
             _logger.LogInformation($"eSewa verification response: {content}");
 
-            // Parse XML response from eSewa
+            // Parse JSON response from new eSewa API
             if (response.IsSuccessStatusCode && !string.IsNullOrEmpty(content))
             {
                 try
                 {
-                    var xmlDoc = XDocument.Parse(content);
-                    var responseCode = xmlDoc.Root?.Element("response_code")?.Value;
+                    using var jsonDoc = System.Text.Json.JsonDocument.Parse(content);
+                    var root = jsonDoc.RootElement;
 
-                    if (responseCode == "Success")
+                    if (root.TryGetProperty("status", out var status) &&
+                        status.GetString()?.ToUpper() == "COMPLETE")
                     {
+                        var refId = root.TryGetProperty("ref_id", out var refIdProp)
+                            ? refIdProp.GetString() ?? ""
+                            : request.RefId;
+                        var transactionUuid = root.TryGetProperty("transaction_uuid", out var txnProp)
+                            ? txnProp.GetString() ?? ""
+                            : request.TransactionId;
+
                         return new VerificationResponse
                         {
                             Success = true,
                             Message = "Payment verified successfully",
-                            TransactionId = request.TransactionId,
-                            RefId = request.RefId,
+                            TransactionId = transactionUuid,
+                            RefId = refId,
                             Amount = request.Amount,
                             Status = "Verified",
                             RawResponse = content
                         };
                     }
                 }
-                catch (Exception xmlEx)
+                catch (Exception jsonEx)
                 {
-                    _logger.LogError(xmlEx, "Error parsing eSewa XML response");
+                    _logger.LogError(jsonEx, "Error parsing eSewa JSON response");
                 }
             }
 
