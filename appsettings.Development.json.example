@@ -1,0 +1,12 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "eSewa": {
+    "PublishableKey": "esewa_publishable_key",
+    "SecretKey": "esewa_secret_key",
+  }
+}
