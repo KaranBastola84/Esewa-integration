@@ -5,8 +5,13 @@
       "Microsoft.AspNetCore": "Warning"
     }
   },
-  "eSewa": {
-    "PublishableKey": "esewa_publishable_key",
-    "SecretKey": "esewa_secret_key",
+  "AllowedHosts": "*",
+  "Esewa": {
+    "MerchantCode": "",
+    "SecretKey": "",
+    "PaymentUrl": "",
+    "VerificationUrl": "",
+    "SuccessUrl": "",
+    "FailureUrl": ""
   }
 }
