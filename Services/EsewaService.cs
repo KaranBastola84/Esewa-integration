@@ -1,15 +1,14 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Xml.Linq;
+using System.Text.Json;
 using EsewaBackend.Models;
 
 namespace EsewaBackend.Services;
 
 public class EsewaService : IEsewaService
 {
-    private readonly IConfiguration _configuration;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly EsewaConfig _esewaConfig;
+    private readonly EsewaConfig _config;
     private readonly ILogger<EsewaService> _logger;
 
     public EsewaService(
@@ -17,139 +16,138 @@ public class EsewaService : IEsewaService
         IHttpClientFactory httpClientFactory,
         ILogger<EsewaService> logger)
     {
-        _configuration = configuration;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
-        _esewaConfig = configuration.GetSection("Esewa").Get<EsewaConfig>() ?? new EsewaConfig();
+        _config = configuration.GetSection("Esewa").Get<EsewaConfig>()
+                  ?? throw new Exception("Esewa configuration missing");
     }
 
-    public async Task<PaymentResponse> InitiatePayment(PaymentRequest request)
+    // ================= INITIATE PAYMENT =================
+    public Task<PaymentResponse> InitiatePayment(PaymentRequest request)
     {
         try
         {
-            var transactionId = Guid.NewGuid().ToString("N");
-            var totalAmount = request.Amount + request.TaxAmount + request.ServiceCharge + request.DeliveryCharge;
+            var transactionUuid = Guid.NewGuid().ToString("N");
 
-            // For eSewa v2 API (epay)
+            var totalAmount =
+                request.Amount +
+                request.TaxAmount +
+                request.ServiceCharge +
+                request.DeliveryCharge;
+
+            var message =
+                $"total_amount={totalAmount:0.00}," +
+                $"transaction_uuid={transactionUuid}," +
+                $"product_code={_config.ProductCode}";
+
+            var signature = GenerateSignature(message);
+
             var formData = new Dictionary<string, string>
             {
-                { "amount", request.Amount.ToString("0.00") },
-                { "tax_amount", request.TaxAmount.ToString("0.00") },
-                { "total_amount", totalAmount.ToString("0.00") },
-                { "transaction_uuid", transactionId },
-                { "product_code", _esewaConfig.MerchantCode },
-                { "product_service_charge", request.ServiceCharge.ToString("0.00") },
-                { "product_delivery_charge", request.DeliveryCharge.ToString("0.00") },
-                { "success_url", _esewaConfig.SuccessUrl },
-                { "failure_url", _esewaConfig.FailureUrl },
-                { "signed_field_names", "total_amount,transaction_uuid,product_code" }
+                ["amount"] = request.Amount.ToString("0.00"),
+                ["tax_amount"] = request.TaxAmount.ToString("0.00"),
+                ["total_amount"] = totalAmount.ToString("0.00"),
+                ["transaction_uuid"] = transactionUuid,
+                ["product_code"] = _config.ProductCode,
+                ["product_service_charge"] = request.ServiceCharge.ToString("0.00"),
+                ["product_delivery_charge"] = request.DeliveryCharge.ToString("0.00"),
+                ["success_url"] = _config.SuccessUrl,
+                ["failure_url"] = _config.FailureUrl,
+                ["signed_field_names"] = _config.SignedFieldNames,
+                ["signature"] = signature
             };
 
-            // Generate signature
-            var message = $"total_amount={totalAmount:0.00},transaction_uuid={transactionId},product_code={_esewaConfig.MerchantCode}";
-            var signature = GenerateSignature(message);
-            formData.Add("signature", signature);
-
-            return await Task.FromResult(new PaymentResponse
+            return Task.FromResult(new PaymentResponse
             {
                 Success = true,
-                Message = "Payment initiated successfully",
-                TransactionId = transactionId,
-                PaymentUrl = _esewaConfig.PaymentUrl,
+                Message = "Payment initiated",
+                TransactionId = transactionUuid,
+                PaymentUrl = _config.PaymentUrl,
                 FormData = formData
             });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error initiating payment");
-            return new PaymentResponse
+            _logger.LogError(ex, "eSewa payment initiation failed");
+            return Task.FromResult(new PaymentResponse
             {
                 Success = false,
-                Message = $"Error initiating payment: {ex.Message}"
-            };
+                Message = ex.Message
+            });
         }
     }
 
+    // ================= VERIFY PAYMENT =================
     public async Task<VerificationResponse> VerifyPayment(VerificationRequest request)
     {
         try
         {
-            var httpClient = _httpClientFactory.CreateClient();
+            var client = _httpClientFactory.CreateClient();
 
-            // New eSewa API verification endpoint with query parameters
-            var verificationUrl = $"{_esewaConfig.VerificationUrl}?product_code={_esewaConfig.MerchantCode}&total_amount={request.Amount:0.00}&transaction_uuid={request.TransactionId}";
+            var url =
+                $"{_config.VerificationUrl}?" +
+                $"product_code={_config.ProductCode}&" +
+                $"total_amount={request.TotalAmount:0.00}&" +
+                $"transaction_uuid={request.TransactionUuid}";
 
-            var response = await httpClient.GetAsync(verificationUrl);
-            var content = await response.Content.ReadAsStringAsync();
+            var response = await client.GetAsync(url);
+            var json = await response.Content.ReadAsStringAsync();
 
-            _logger.LogInformation($"eSewa verification response: {content}");
+            _logger.LogInformation("eSewa verification response: {Json}", json);
 
-            // Parse JSON response from new eSewa API
-            if (response.IsSuccessStatusCode && !string.IsNullOrEmpty(content))
+            if (!response.IsSuccessStatusCode)
             {
-                try
-                {
-                    using var jsonDoc = System.Text.Json.JsonDocument.Parse(content);
-                    var root = jsonDoc.RootElement;
-
-                    if (root.TryGetProperty("status", out var status) &&
-                        status.GetString()?.ToUpper() == "COMPLETE")
-                    {
-                        var refId = root.TryGetProperty("ref_id", out var refIdProp)
-                            ? refIdProp.GetString() ?? ""
-                            : request.RefId;
-                        var transactionUuid = root.TryGetProperty("transaction_uuid", out var txnProp)
-                            ? txnProp.GetString() ?? ""
-                            : request.TransactionId;
-
-                        return new VerificationResponse
-                        {
-                            Success = true,
-                            Message = "Payment verified successfully",
-                            TransactionId = transactionUuid,
-                            RefId = refId,
-                            Amount = request.Amount,
-                            Status = "Verified",
-                            RawResponse = content
-                        };
-                    }
-                }
-                catch (Exception jsonEx)
-                {
-                    _logger.LogError(jsonEx, "Error parsing eSewa JSON response");
-                }
+                return FailVerification("Verification API failed", json);
             }
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var status = root.GetProperty("status").GetString() ?? "UNKNOWN";
 
             return new VerificationResponse
             {
-                Success = false,
-                Message = "Payment verification failed",
-                TransactionId = request.TransactionId,
-                Status = "Failed",
-                RawResponse = content
+                Success = status == "COMPLETE",
+                Status = status,
+                TransactionId = root.GetProperty("transaction_uuid").GetString() ?? "",
+                RefId = root.TryGetProperty("ref_id", out var refId)
+                            ? refId.GetString() ?? ""
+                            : "",
+                Amount = request.TotalAmount,
+                Message = status == "COMPLETE"
+                            ? "Payment verified successfully"
+                            : "Payment not completed",
+                RawResponse = json
             };
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error verifying payment");
+            _logger.LogError(ex, "eSewa verification error");
             return new VerificationResponse
             {
                 Success = false,
-                Message = $"Error verifying payment: {ex.Message}",
-                Status = "Error"
+                Status = "ERROR",
+                Message = ex.Message
             };
         }
     }
 
-    public string GenerateSignature(string message)
+    // ================= SIGNATURE =================
+    private string GenerateSignature(string message)
     {
-        var secretKey = _esewaConfig.SecretKey;
-        var encoding = new UTF8Encoding();
-        var keyBytes = encoding.GetBytes(secretKey);
-        var messageBytes = encoding.GetBytes(message);
+        using var hmac =
+            new HMACSHA256(Encoding.UTF8.GetBytes(_config.SecretKey));
 
-        using var hmac = new HMACSHA256(keyBytes);
-        var hashBytes = hmac.ComputeHash(messageBytes);
-        return Convert.ToBase64String(hashBytes);
+        var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(message));
+        return Convert.ToBase64String(hash);
     }
+
+    private static VerificationResponse FailVerification(string msg, string raw) =>
+        new()
+        {
+            Success = false,
+            Status = "FAILED",
+            Message = msg,
+            RawResponse = raw
+        };
 }

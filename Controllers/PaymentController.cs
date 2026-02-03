@@ -44,9 +44,9 @@ public class PaymentController : ControllerBase
     [HttpPost("verify")]
     public async Task<IActionResult> VerifyPayment([FromBody] VerificationRequest request)
     {
-        if (string.IsNullOrEmpty(request.TransactionId) || string.IsNullOrEmpty(request.RefId))
+        if (string.IsNullOrEmpty(request.TransactionId))
         {
-            return BadRequest(new { message = "Transaction ID and Ref ID are required" });
+            return BadRequest(new { message = "Transaction ID is required" });
         }
 
         var result = await _esewaService.VerifyPayment(request);

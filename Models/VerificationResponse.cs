@@ -7,6 +7,11 @@ public class VerificationResponse
     public string TransactionId { get; set; } = string.Empty;
     public string RefId { get; set; } = string.Empty;
     public decimal Amount { get; set; }
-    public string Status { get; set; } = string.Empty;
+    public enum EsewaPaymentStatus
+    {
+        COMPLETE,
+        PENDING,
+        FAILED
+    }
     public string? RawResponse { get; set; }
 }
